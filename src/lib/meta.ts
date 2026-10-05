@@ -31,15 +31,19 @@ export type MetaDay = {
   impressions: number;
   reach: number;
   unique_outbound_clicks: number;
+  unique_link_clicks: number;
   clicks: number;
   lpv: number;
   meta_leads: number;
   meta_schedules: number;
+  /** Leads from Meta instant forms (filled in without leaving Facebook/Instagram). */
+  form_leads: number;
 };
 
 // Se toma el primer tipo de acción presente para no contar dos veces el mismo evento.
 const LEAD_TYPES = ["lead", "offsite_conversion.fb_pixel_lead", "onsite_conversion.lead_grouped"];
 const SCHEDULE_TYPES = ["schedule_total", "schedule_website", "offsite_conversion.fb_pixel_schedule"];
+const FORM_LEAD_TYPES = ["onsite_conversion.lead_grouped", "leadgen_grouped"];
 const LPV_TYPES = ["landing_page_view", "omni_landing_page_view"];
 
 function outbound(list: { action_type: string; value: string }[] | undefined): number {
@@ -60,7 +64,7 @@ export async function getDailyInsights(accountId: string, since: string, until: 
     level: "account",
     time_increment: "1",
     time_range: JSON.stringify({ since, until }),
-    fields: "spend,impressions,reach,clicks,unique_outbound_clicks,actions",
+    fields: "spend,impressions,reach,clicks,unique_outbound_clicks,unique_inline_link_clicks,actions",
     limit: "500",
     access_token: token(),
   });
@@ -75,10 +79,12 @@ export async function getDailyInsights(accountId: string, since: string, until: 
         impressions: Number(r.impressions) || 0,
         reach: Number(r.reach) || 0,
         unique_outbound_clicks: outbound(r.unique_outbound_clicks),
+        unique_link_clicks: Number(r.unique_inline_link_clicks) || 0,
         clicks: Number(r.clicks) || 0,
         lpv: pick(r.actions, LPV_TYPES),
         meta_leads: pick(r.actions, LEAD_TYPES),
         meta_schedules: pick(r.actions, SCHEDULE_TYPES),
+        form_leads: pick(r.actions, FORM_LEAD_TYPES),
       });
     }
     url = b.paging?.next;
@@ -86,7 +92,7 @@ export async function getDailyInsights(accountId: string, since: string, until: 
   return out;
 }
 
-export type MetaAdDay = MetaDay & { ad_id: string; ad_name: string | null; campaign_name: string | null };
+export type MetaAdDay = MetaDay & { ad_id: string; ad_name: string | null; adset_id: string | null; campaign_name: string | null };
 
 /** Gasto diario por anuncio. Solo devuelve anuncios con entrega en el período. */
 export async function getDailyAdInsights(accountId: string, since: string, until: string): Promise<MetaAdDay[]> {
@@ -94,7 +100,7 @@ export async function getDailyAdInsights(accountId: string, since: string, until
     level: "ad",
     time_increment: "1",
     time_range: JSON.stringify({ since, until }),
-    fields: "ad_id,ad_name,campaign_name,spend,impressions,reach,clicks,unique_outbound_clicks,actions",
+    fields: "ad_id,ad_name,adset_id,campaign_name,spend,impressions,reach,clicks,unique_outbound_clicks,unique_inline_link_clicks,actions",
     limit: "500",
     access_token: token(),
   });
@@ -107,15 +113,18 @@ export async function getDailyAdInsights(accountId: string, since: string, until
         date: r.date_start,
         ad_id: r.ad_id,
         ad_name: r.ad_name ?? null,
+        adset_id: r.adset_id ?? null,
         campaign_name: r.campaign_name ?? null,
         spend: Number(r.spend) || 0,
         impressions: Number(r.impressions) || 0,
         reach: Number(r.reach) || 0,
         unique_outbound_clicks: outbound(r.unique_outbound_clicks),
+        unique_link_clicks: Number(r.unique_inline_link_clicks) || 0,
         clicks: Number(r.clicks) || 0,
         lpv: pick(r.actions, LPV_TYPES),
         meta_leads: pick(r.actions, LEAD_TYPES),
         meta_schedules: pick(r.actions, SCHEDULE_TYPES),
+        form_leads: pick(r.actions, FORM_LEAD_TYPES),
       });
     }
     url = b.paging?.next;
@@ -139,11 +148,11 @@ export async function getRangeUniques(
   accountId: string,
   since: string,
   until: string,
-): Promise<{ reach: number; uniqueOutboundClicks: number } | null> {
+): Promise<{ reach: number; uniqueOutboundClicks: number; uniqueLinkClicks: number } | null> {
   const params = new URLSearchParams({
     level: "account",
     time_range: JSON.stringify({ since, until }),
-    fields: "reach,unique_outbound_clicks",
+    fields: "reach,unique_outbound_clicks,unique_inline_link_clicks",
     access_token: token(),
   });
   try {
@@ -154,8 +163,97 @@ export async function getRangeUniques(
     const b = await res.json();
     if (!res.ok || b.error) return null;
     const r = b.data?.[0];
-    if (!r) return { reach: 0, uniqueOutboundClicks: 0 };
-    return { reach: Number(r.reach) || 0, uniqueOutboundClicks: outbound(r.unique_outbound_clicks) };
+    if (!r) return { reach: 0, uniqueOutboundClicks: 0, uniqueLinkClicks: 0 };
+    return {
+      reach: Number(r.reach) || 0,
+      uniqueOutboundClicks: outbound(r.unique_outbound_clicks),
+      uniqueLinkClicks: Number(r.unique_inline_link_clicks) || 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export type Channel = "form" | "landing" | "other";
+
+/** Where each ad set sends people (ON_AD = instant form, WEBSITE = landing page, ...). */
+export async function getAdsetDestinations(accountId: string): Promise<Record<string, string>> {
+  const params = new URLSearchParams({
+    fields: "id,destination_type",
+    limit: "500",
+    filtering: JSON.stringify([
+      { field: "effective_status", operator: "IN", value: ["ACTIVE", "PAUSED", "ARCHIVED", "CAMPAIGN_PAUSED", "ADSET_PAUSED", "IN_PROCESS", "WITH_ISSUES"] },
+    ]),
+    access_token: token(),
+  });
+  let url: string | undefined = `${BASE}/act_${accountId}/adsets?${params}`;
+  const out: Record<string, string> = {};
+  while (url) {
+    const b = await graph(url);
+    for (const a of b.data ?? []) out[a.id] = a.destination_type ?? "UNDEFINED";
+    url = b.paging?.next;
+  }
+  return out;
+}
+
+/**
+ * Instant form, landing page, or other (Messenger, Instagram DM, ...).
+ * The ad set's destination decides when it is clear; otherwise what the ad produced does.
+ */
+export function channelOf(destination: string | undefined, r: { lpv: number; form_leads: number; meta_leads: number; unique_outbound_clicks: number }): Channel {
+  const d = (destination ?? "UNDEFINED").toUpperCase();
+  if (d === "ON_AD") return "form";
+  if (d.includes("WEBSITE")) return "landing";
+  if (r.form_leads > 0 && r.lpv === 0) return "form";
+  if (r.lpv > 0 || r.unique_outbound_clicks > 0 || r.meta_leads > r.form_leads) return "landing";
+  if (d === "UNDEFINED") return "landing";
+  return "other";
+}
+
+export type ChannelUniques = Record<Channel, { reach: number; uniqueOutboundClicks: number; uniqueLinkClicks: number }>;
+
+/**
+ * Reach and unique clicks per channel for a date range, from ad set totals
+ * (Meta de-duplicates people within each ad set; across ad sets they are added up).
+ */
+export async function getRangeUniquesByChannel(
+  accountId: string,
+  since: string,
+  until: string,
+  destinations: Record<string, string>,
+): Promise<ChannelUniques | null> {
+  const params = new URLSearchParams({
+    level: "adset",
+    time_range: JSON.stringify({ since, until }),
+    fields: "adset_id,reach,unique_outbound_clicks,unique_inline_link_clicks,actions",
+    limit: "500",
+    access_token: token(),
+  });
+  const out: ChannelUniques = {
+    form: { reach: 0, uniqueOutboundClicks: 0, uniqueLinkClicks: 0 },
+    landing: { reach: 0, uniqueOutboundClicks: 0, uniqueLinkClicks: 0 },
+    other: { reach: 0, uniqueOutboundClicks: 0, uniqueLinkClicks: 0 },
+  };
+  try {
+    let url: string | undefined = `${BASE}/act_${accountId}/insights?${params}`;
+    while (url) {
+      const res: Response = await fetch(url, { next: { revalidate: 3600 }, signal: AbortSignal.timeout(15_000) });
+      const b: any = await res.json();
+      if (!res.ok || b.error) return null;
+      for (const r of b.data ?? []) {
+        const ch = channelOf(destinations[r.adset_id], {
+          lpv: pick(r.actions, LPV_TYPES),
+          form_leads: pick(r.actions, FORM_LEAD_TYPES),
+          meta_leads: pick(r.actions, LEAD_TYPES),
+          unique_outbound_clicks: outbound(r.unique_outbound_clicks),
+        });
+        out[ch].reach += Number(r.reach) || 0;
+        out[ch].uniqueOutboundClicks += outbound(r.unique_outbound_clicks);
+        out[ch].uniqueLinkClicks += Number(r.unique_inline_link_clicks) || 0;
+      }
+      url = b.paging?.next;
+    }
+    return out;
   } catch {
     return null;
   }

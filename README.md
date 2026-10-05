@@ -25,6 +25,7 @@ After the deploy, open the site, enter your password and click **Load the last 9
 
 - **Leads**: GHL contacts with an email, by the day they came in (in the ad account's time zone). Names containing "test" are skipped; add more in `EXCLUDED_EMAILS` / `EXCLUDED_EMAIL_DOMAINS`.
 - **Pipeline steps**: a lead counts in a step if it has *ever* been in any of that step's stages. GHL only stores the current stage, so the dashboard keeps its own history from the first sync onward. Choose the stages on the **Settings** page.
+- **Channels**: instant form leads (GHL's Facebook lead ads integration) are matched to their ad by ad ID; website leads count as landing-page leads when their `utm_content` matches a landing-page ad. Ads are sorted into channels by their ad set's destination (instant form vs website). Pick **Instant forms** or **Landing pages** at the top to see each funnel on its own: forms start at unique link clicks (form opens), landing pages at unique outbound clicks and landing page views.
 - **Won deals**: opportunities marked Won, with their value if one is entered.
 - **Unique outbound clicks and CTR** come straight from Meta for the exact date range, so they match Ads Manager.
 - **By ad**: leads are matched to ads by ad name, using the `utm_content` each lead arrived with (from GHL attribution or a custom field named `utm_content`).

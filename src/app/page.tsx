@@ -1,9 +1,9 @@
 import { config } from "@/config";
 import { daysBetween } from "@/lib/dates";
 import { dateTime, int, money, shortDate } from "@/lib/format";
-import { getRangeUniques } from "@/lib/meta";
-import { computeTotals, inStep, Lead, loadRange, previousRange, ratio, summarizeAds } from "@/lib/metrics";
-import { loadAccount, loadFunnelSettings, loadPipelines } from "@/lib/settings";
+import { getRangeUniques, getRangeUniquesByChannel } from "@/lib/meta";
+import { channelBreakdown, computeTotals, inStep, Lead, leadChannel, loadRange, previousRange, ratio, summarizeAds, View } from "@/lib/metrics";
+import { loadAccount, loadAdsetDestinations, loadFunnelSettings, loadPipelines } from "@/lib/settings";
 import { AdFunnel, FunnelData } from "./funnel";
 import { Delta, RangeBar, rangeLabel, resolveRange, SyncStatus } from "./ui";
 
@@ -29,22 +29,34 @@ export default async function Dashboard({ searchParams }: Props) {
   const range = resolveRange(sp, tz);
   const prev = previousRange(range.from, range.to);
   const adAccount = config.metaAdAccountId();
+  const view: View = sp.ch === "form" || sp.ch === "landing" ? sp.ch : "all";
+  const destinations = view === "all" ? {} : await loadAdsetDestinations();
 
+  type Live = { reach: number; uniqueOutboundClicks: number; uniqueLinkClicks: number } | null;
+  const live = async (from: string, to: string): Promise<Live> => {
+    if (view === "all") return getRangeUniques(adAccount, from, to);
+    const byCh = await getRangeUniquesByChannel(adAccount, from, to, destinations);
+    return byCh ? byCh[view] : null;
+  };
   const [cur, before, liveCur, livePrev] = await Promise.all([
-    loadRange(range.from, range.to),
-    loadRange(prev.from, prev.to),
-    getRangeUniques(adAccount, range.from, range.to),
-    getRangeUniques(adAccount, prev.from, prev.to),
+    loadRange(range.from, range.to, view),
+    loadRange(prev.from, prev.to, view),
+    live(range.from, range.to),
+    live(prev.from, prev.to),
   ]);
   const t = computeTotals(settings, cur.meta, cur.leads);
   const p = computeTotals(settings, before.meta, before.leads);
-  const ads = await summarizeAds(settings, range.from, range.to, cur.leads);
+  const ads = summarizeAds(settings, cur.ads, cur.leads, view);
+  const channels = view === "all" ? channelBreakdown(settings, cur.allLeads, cur.ads, cur.landing) : [];
 
-  const sumBy = (rows: typeof cur.meta, k: "reach" | "unique_outbound_clicks") => rows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
-  const funnelOf = (tot: typeof t, rows: typeof cur.meta, live: Awaited<ReturnType<typeof getRangeUniques>>): FunnelData => ({
+  const sumBy = (rows: typeof cur.meta, k: "reach" | "unique_outbound_clicks" | "unique_link_clicks") =>
+    rows.reduce((a, r) => a + (Number(r[k]) || 0), 0);
+  const funnelOf = (tot: typeof t, rows: typeof cur.meta, live: Live): FunnelData => ({
+    mode: view,
     spend: tot.spend,
     reach: live?.reach ?? sumBy(rows, "reach"),
     uniqueOutboundClicks: live?.uniqueOutboundClicks ?? sumBy(rows, "unique_outbound_clicks"),
+    uniqueLinkClicks: live?.uniqueLinkClicks ?? sumBy(rows, "unique_link_clicks"),
     lpv: tot.lpv,
     leads: tot.leads,
     steps: settings.steps.map((s, i) => ({ label: s.label, count: tot.steps[i] })),
@@ -67,7 +79,27 @@ export default async function Dashboard({ searchParams }: Props) {
         <SyncStatus />
       </header>
 
-      <RangeBar basePath="/" range={range} tz={tz} />
+      <div className="toolbar">
+        <RangeBar basePath="/" range={range} tz={tz} extra={view === "all" ? {} : { ch: view }} />
+        <div className="presets" role="group" aria-label="Channel">
+          {(
+            [
+              ["all", "All channels"],
+              ["form", "Instant forms"],
+              ["landing", "Landing pages"],
+            ] as const
+          ).map(([k, label]) => (
+            <a
+              key={k}
+              className="preset"
+              href={`/?from=${range.from}&to=${range.to}${k === "all" ? "" : `&ch=${k}`}`}
+              aria-current={view === k ? "true" : undefined}
+            >
+              {label}
+            </a>
+          ))}
+        </div>
+      </div>
 
       {isDefault && (
         <p className="notice">
@@ -98,6 +130,62 @@ export default async function Dashboard({ searchParams }: Props) {
           />
         )}
       </dl>
+
+      {channels.length > 0 && (
+        <section className="section">
+          <h2>By channel</h2>
+          <p className="hint">
+            Instant form leads are matched to their ad by Meta’s ad ID. Website leads count as “Landing pages” when their utm_content
+            matches a landing-page ad; the rest are organic or direct.
+          </p>
+          <div className="scroll">
+            <table className="data">
+              <thead>
+                <tr>
+                  <th>Channel</th>
+                  <th>Spend</th>
+                  <th>Leads</th>
+                  <th>Cost per lead</th>
+                  {settings.steps.map((s) => (
+                    <th key={s.id}>{s.label}</th>
+                  ))}
+                  {settings.steps.map((s) => (
+                    <th key={`c${s.id}`}>Cost per {s.label.toLowerCase().replace(/\bcalls\b/, "call").replace(/ups\b/, "up")}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {channels.map((c) => (
+                  <tr key={c.key}>
+                    <td>
+                      {c.key === "unpaid" ? (
+                        c.label
+                      ) : (
+                        <a className="client-link" href={`/?from=${range.from}&to=${range.to}&ch=${c.key}`}>
+                          {c.label}
+                        </a>
+                      )}
+                    </td>
+                    <td className="strong">{c.spend === null ? <span className="na">–</span> : money(c.spend, currency)}</td>
+                    <td>{int(c.totals.leads)}</td>
+                    <td className="cost">{c.spend === null ? <span className="na">–</span> : money(ratio(c.spend, c.totals.leads), currency)}</td>
+                    {c.totals.steps.map((n, i) => (
+                      <td key={i} className={i === 0 ? "num-booked" : "num-qual"}>
+                        {int(n)}
+                      </td>
+                    ))}
+                    {c.totals.steps.map((n, i) => (
+                      <td key={`c${i}`} className="cost">
+                        {c.spend === null ? <span className="na">–</span> : money(ratio(c.spend, n), currency)}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section className="section">
         <h2>By day</h2>
@@ -143,7 +231,7 @@ export default async function Dashboard({ searchParams }: Props) {
       {ads.length > 0 && (
         <section className="section">
           <h2>By ad</h2>
-          <p className="hint">Spend from Meta, matched to GHL leads by ad name (the utm_content each lead arrived with).</p>
+          <p className="hint">Spend from Meta, matched to GHL leads by ad ID (instant forms) or ad name (utm_content on landing pages).</p>
           <div className="scroll">
             <table className="data">
               <thead>
@@ -164,7 +252,13 @@ export default async function Dashboard({ searchParams }: Props) {
                   <tr key={a.ad}>
                     <td>
                       {a.ad}
-                      {a.campaign && <span className="src">{a.campaign}</span>}
+                      {(a.campaign || a.channel) && (
+                        <span className="src">
+                          {[a.channel === "form" ? "Instant form" : a.channel === "landing" ? "Landing page" : a.channel === "other" ? "Other" : null, a.campaign]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </span>
+                      )}
                     </td>
                     <td className="strong">{a.spend === null ? <span className="na">–</span> : money(a.spend, currency)}</td>
                     <td>{int(a.leads)}</td>
@@ -195,6 +289,7 @@ export default async function Dashboard({ searchParams }: Props) {
                 <tr>
                   <th>Created</th>
                   <th className="left">Contact</th>
+                  <th className="left">Came from</th>
                   <th className="left">Current stage</th>
                   <th className="left">Reached</th>
                   <th className="left">Ad</th>
@@ -202,7 +297,15 @@ export default async function Dashboard({ searchParams }: Props) {
               </thead>
               <tbody>
                 {cur.leads.map((l) => (
-                  <LeadLine key={l.contact_id} lead={l} tz={tz} settings={settings} stageName={stageName} currency={currency} />
+                  <LeadLine
+                    key={l.contact_id}
+                    lead={l}
+                    tz={tz}
+                    settings={settings}
+                    stageName={stageName}
+                    currency={currency}
+                    channel={leadChannel(l, cur.landing)}
+                  />
                 ))}
               </tbody>
             </table>
@@ -219,7 +322,9 @@ function LeadLine({
   settings,
   stageName,
   currency,
+  channel,
 }: {
+  channel: string;
   lead: Lead;
   tz: string;
   settings: Awaited<ReturnType<typeof loadFunnelSettings>>["settings"];
@@ -234,6 +339,7 @@ function LeadLine({
         <strong>{l.name || "No name"}</strong>
         <span className="src">{l.email}</span>
       </td>
+      <td className="left">{channel === "form" ? "Instant form" : channel === "landing" ? "Landing page" : "Organic / direct"}</td>
       <td className="left">{current || <span className="na">No opportunity</span>}</td>
       <td className="left">
         {settings.steps.filter((s) => inStep(l, s)).map((s) => (

@@ -2,9 +2,12 @@ import { int, money } from "@/lib/format";
 import { Delta } from "./ui";
 
 export type FunnelData = {
+  /** "form": clicks open a Meta instant form; otherwise clicks go to a landing page. */
+  mode: "form" | "landing" | "all";
   spend: number;
   reach: number;
   uniqueOutboundClicks: number;
+  uniqueLinkClicks: number;
   lpv: number;
   leads: number;
   /** Pipeline steps after Leads (label + count). */
@@ -33,6 +36,9 @@ export function AdFunnel({
   const m = (d: FunnelData) => ({
     cpc: div(d.spend, d.uniqueOutboundClicks),
     ctr: div(d.uniqueOutboundClicks, d.reach),
+    cplc: div(d.spend, d.uniqueLinkClicks),
+    lctr: div(d.uniqueLinkClicks, d.reach),
+    formCvr: div(d.leads, d.uniqueLinkClicks),
     cplpv: div(d.spend, d.lpv),
     cvr: div(d.leads, d.lpv),
     cpl: div(d.spend, d.leads),
@@ -40,7 +46,26 @@ export function AdFunnel({
   const a = m(cur);
   const b = m(prev);
 
-  const stages: Stage[] = [
+  const formTop: Stage[] = [
+    {
+      name: "Unique link clicks (form opens)",
+      count: cur.uniqueLinkClicks,
+      metrics: [
+        { label: "Cost per unique link click", value: money(a.cplc, currency), cur: a.cplc, prev: b.cplc, better: "down" },
+        { label: "Unique link CTR", value: pctText(a.lctr), cur: a.lctr, prev: b.lctr, better: "up" },
+      ],
+    },
+    {
+      name: "Leads",
+      count: cur.leads,
+      rate: { label: "of clicks", value: a.formCvr },
+      metrics: [
+        { label: "Form conversion (leads / link clicks)", value: pctText(a.formCvr), cur: a.formCvr, prev: b.formCvr, better: "up" },
+        { label: "Cost per lead", value: money(a.cpl, currency), cur: a.cpl, prev: b.cpl, better: "down" },
+      ],
+    },
+  ];
+  const landingTop: Stage[] = [
     {
       name: "Unique outbound clicks",
       count: cur.uniqueOutboundClicks,
@@ -67,6 +92,29 @@ export function AdFunnel({
         { label: "Cost per lead", value: money(a.cpl, currency), cur: a.cpl, prev: b.cpl, better: "down" },
       ],
     },
+  ];
+  const allTop: Stage[] = [
+    {
+      name: "Unique link clicks",
+      count: cur.uniqueLinkClicks,
+      metrics: [
+        { label: "Cost per unique link click", value: money(a.cplc, currency), cur: a.cplc, prev: b.cplc, better: "down" },
+        { label: "Unique link CTR", value: pctText(a.lctr), cur: a.lctr, prev: b.lctr, better: "up" },
+      ],
+    },
+    {
+      name: "Leads",
+      count: cur.leads,
+      rate: { label: "of clicks", value: a.formCvr },
+      metrics: [
+        { label: "Cost per lead", value: money(a.cpl, currency), cur: a.cpl, prev: b.cpl, better: "down" },
+        { label: "Landing page views", value: int(cur.lpv), cur: cur.lpv, prev: prev.lpv, better: "up" },
+      ],
+    },
+  ];
+
+  const stages: Stage[] = [
+    ...(cur.mode === "form" ? formTop : cur.mode === "landing" ? landingTop : allTop),
     ...cur.steps.map((st, i): Stage => {
       const prevCount = prev.steps[i]?.count ?? null;
       const cost = div(cur.spend, st.count);
@@ -106,9 +154,14 @@ export function AdFunnel({
     <section className="section">
       <h2>Funnel</h2>
       <p className="hint">
-        From the ad click to the pipeline, for {money(cur.spend, currency)} spent. Pipeline steps count each lead once,
-        on the day the lead came in, if it has ever reached that stage.
-        {approximate ? " Clicks and CTR are summed by day because Meta didn't answer, so they may run slightly high." : ""}
+        {cur.mode === "form"
+          ? "Meta instant forms: people tap the ad, a form opens inside Facebook or Instagram, and they submit it."
+          : cur.mode === "landing"
+            ? "Landing pages: people click through to your website and fill in a form there."
+            : "All channels together. Pick Instant forms or Landing pages above to see each funnel on its own."}{" "}
+        {money(cur.spend, currency)} spent. Pipeline steps count each lead once, on the day it came in, if it has ever reached
+        that stage.
+        {approximate ? " Unique clicks are added up by day or ad set, so they may run slightly high." : ""}
       </p>
       <ol className="afunnel">
         {stages.map((s, i) => (

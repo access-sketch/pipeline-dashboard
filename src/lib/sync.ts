@@ -2,7 +2,7 @@ import { config, excluded, TEST_NAME_PATTERN } from "@/config";
 import { addDays, localDate, todayIn } from "./dates";
 import { getAllOpportunities, getPipelines, getUtmContentFieldIds, GhlContact, searchContacts } from "./ghl";
 import { mapLimit } from "./http";
-import { getAccountInfo, getDailyAdInsights, getDailyInsights } from "./meta";
+import { channelOf, getAccountInfo, getAdsetDestinations, getDailyAdInsights, getDailyInsights } from "./meta";
 import { ensureSchema } from "./migrate";
 import { setValue } from "./settings";
 import { db, upsertChunks } from "./supabase";
@@ -38,23 +38,30 @@ export async function syncAll(opts: { days: number; trigger: string }): Promise<
     await setValue("account", { timezone: tz, currency: info.currency });
     const until = todayIn(tz);
     const since = addDays(until, -(opts.days - 1));
-    const [daily, ads] = await Promise.all([getDailyInsights(id, since, until), getDailyAdInsights(id, since, until)]);
+    const [daily, ads, destinations] = await Promise.all([
+      getDailyInsights(id, since, until),
+      getDailyAdInsights(id, since, until),
+      getAdsetDestinations(id).catch(() => ({}) as Record<string, string>),
+    ]);
+    await setValue("adsets", destinations);
     const now = new Date().toISOString();
     await upsertChunks(
       "pd_meta_daily",
       daily.map((r) => ({
         date: r.date, spend: r.spend, impressions: r.impressions, reach: r.reach, clicks: r.clicks,
-        unique_outbound_clicks: r.unique_outbound_clicks, lpv: r.lpv, meta_leads: r.meta_leads,
-        currency: info.currency, updated_at: now,
+        unique_outbound_clicks: r.unique_outbound_clicks, unique_link_clicks: r.unique_link_clicks, lpv: r.lpv,
+        meta_leads: r.meta_leads, form_leads: r.form_leads, currency: info.currency, updated_at: now,
       })),
       "date",
     );
     await upsertChunks(
       "pd_meta_ad_daily",
       ads.map((r) => ({
-        date: r.date, ad_id: r.ad_id, ad_name: r.ad_name, campaign_name: r.campaign_name, spend: r.spend,
-        impressions: r.impressions, reach: r.reach, clicks: r.clicks, unique_outbound_clicks: r.unique_outbound_clicks,
-        lpv: r.lpv, meta_leads: r.meta_leads, updated_at: now,
+        date: r.date, ad_id: r.ad_id, ad_name: r.ad_name, adset_id: r.adset_id, campaign_name: r.campaign_name,
+        channel: channelOf(r.adset_id ? destinations[r.adset_id] : undefined, r),
+        spend: r.spend, impressions: r.impressions, reach: r.reach, clicks: r.clicks,
+        unique_outbound_clicks: r.unique_outbound_clicks, unique_link_clicks: r.unique_link_clicks,
+        lpv: r.lpv, meta_leads: r.meta_leads, form_leads: r.form_leads, updated_at: now,
       })),
       "date,ad_id",
     );
@@ -168,8 +175,22 @@ function leadRow(c: GhlContact, tz: string, utmIds: string[]) {
     utm_campaign: c.attributionSource?.campaign ?? c.attributionSource?.utmCampaign ?? c.lastAttributionSource?.utmCampaign ?? null,
     utm_content: c.attributionSource?.utmContent ?? firstField(fields, utmIds) ?? c.lastAttributionSource?.utmContent ?? null,
     tags,
+    source: leadSource(c),
+    ad_id: c.attributionSource?.adId ?? c.lastAttributionSource?.adId ?? null,
     updated_at: new Date().toISOString(),
   };
+}
+
+/**
+ * "form" = Meta instant form (arrives through GHL's Facebook lead ads integration),
+ * "website" = a form, survey or calendar on a page, "other" = anything else (manual, chat, ...).
+ */
+function leadSource(c: GhlContact): "form" | "website" | "other" {
+  const a = c.attributionSource ?? {};
+  const medium = (a.medium ?? "").toLowerCase();
+  if (medium === "facebook" || medium === "instagram_lead_form" || (a.adSource === "facebook" && !a.url)) return "form";
+  if (a.url || ["form", "survey", "calendar", "funnel", "quiz", "order_form"].includes(medium)) return "website";
+  return "other";
 }
 
 function firstField(fields: Record<string, unknown>, ids: string[]): string | null {

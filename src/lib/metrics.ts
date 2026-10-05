@@ -1,11 +1,14 @@
 import type { FunnelSettings } from "./settings";
 import { db, selectAll } from "./supabase";
 
+export type View = "all" | "form" | "landing";
+
 export type MetaRow = {
   date: string;
   spend: number;
   reach: number;
   unique_outbound_clicks: number;
+  unique_link_clicks: number;
   lpv: number;
   meta_leads: number;
 };
@@ -18,6 +21,8 @@ export type Lead = {
   name: string | null;
   has_email: boolean;
   utm_content: string | null;
+  source: string | null;
+  ad_id: string | null;
   stage_ids: string[] | null;
   won: boolean;
   won_value: number | null;
@@ -36,20 +41,85 @@ export type Totals = {
   revenue: number;
 };
 
-export async function loadRange(from: string, to: string) {
-  const meta = await selectAll<MetaRow>((a, b) =>
+type AdRow = {
+  date: string;
+  ad_id: string;
+  ad_name: string | null;
+  campaign_name: string | null;
+  channel: string | null;
+  spend: number;
+  reach: number;
+  unique_outbound_clicks: number;
+  unique_link_clicks: number;
+  lpv: number;
+  meta_leads: number;
+};
+
+async function loadAds(from: string, to: string): Promise<AdRow[]> {
+  return selectAll<AdRow>((a, b) =>
     db()
-      .from("pd_meta_daily")
-      .select("date,spend,reach,unique_outbound_clicks,lpv,meta_leads")
+      .from("pd_meta_ad_daily")
+      .select("date,ad_id,ad_name,campaign_name,channel,spend,reach,unique_outbound_clicks,unique_link_clicks,lpv,meta_leads")
       .gte("date", from)
       .lte("date", to)
-      .order("date")
       .range(a, b),
   );
+}
+
+/** Ids and names of every landing-page ad ever seen, to tell paid website leads from organic ones. */
+async function landingAdKeys(): Promise<{ ids: Set<string>; names: Set<string> }> {
+  const rows = await selectAll<{ ad_id: string; ad_name: string | null }>((a, b) =>
+    db().from("pd_meta_ad_daily").select("ad_id,ad_name").eq("channel", "landing").range(a, b),
+  );
+  return { ids: new Set(rows.map((r) => r.ad_id)), names: new Set(rows.map((r) => adKey(r.ad_name)).filter(Boolean)) };
+}
+
+export type LeadChannel = "form" | "landing" | "unpaid";
+
+export function leadChannel(l: Lead, landing: { ids: Set<string>; names: Set<string> }): LeadChannel {
+  if (l.source === "form") return "form";
+  if (l.source === "website" && ((l.ad_id && landing.ids.has(l.ad_id)) || landing.names.has(adKey(l.utm_content)))) return "landing";
+  return "unpaid";
+}
+
+export async function loadRange(from: string, to: string, view: View = "all") {
+  const [daily, ads, landing] = await Promise.all([
+    view === "all"
+      ? selectAll<MetaRow>((a, b) =>
+          db()
+            .from("pd_meta_daily")
+            .select("date,spend,reach,unique_outbound_clicks,unique_link_clicks,lpv,meta_leads")
+            .gte("date", from)
+            .lte("date", to)
+            .order("date")
+            .range(a, b),
+        )
+      : Promise.resolve([] as MetaRow[]),
+    loadAds(from, to),
+    landingAdKeys(),
+  ]);
+
+  // Per channel, the daily numbers are the sum of that channel's ads.
+  let meta = daily;
+  if (view !== "all") {
+    const byDate = new Map<string, MetaRow>();
+    for (const r of ads.filter((x) => x.channel === view)) {
+      const d = byDate.get(r.date) ?? { date: r.date, spend: 0, reach: 0, unique_outbound_clicks: 0, unique_link_clicks: 0, lpv: 0, meta_leads: 0 };
+      d.spend += Number(r.spend);
+      d.reach += r.reach;
+      d.unique_outbound_clicks += r.unique_outbound_clicks;
+      d.unique_link_clicks += r.unique_link_clicks;
+      d.lpv += r.lpv;
+      d.meta_leads += r.meta_leads;
+      byDate.set(r.date, d);
+    }
+    meta = [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+  }
+
   const rows = await selectAll<Omit<Lead, "reached">>((a, b) =>
     db()
       .from("pd_leads")
-      .select("contact_id,created_at,local_date,email,name,has_email,utm_content,stage_ids,won,won_value")
+      .select("contact_id,created_at,local_date,email,name,has_email,utm_content,source,ad_id,stage_ids,won,won_value")
       .gte("local_date", from)
       .lte("local_date", to)
       .eq("is_test", false)
@@ -68,11 +138,29 @@ export async function loadRange(from: string, to: string) {
       history.set(h.contact_id, set);
     }
   }
-  const leads: Lead[] = rows.map((r) => ({
+  const allLeads: Lead[] = rows.map((r) => ({
     ...r,
     reached: new Set([...(history.get(r.contact_id) ?? []), ...(r.stage_ids ?? [])]),
   }));
-  return { meta, leads };
+  const leads = view === "all" ? allLeads : allLeads.filter((l) => leadChannel(l, landing) === view);
+  return { meta, leads, allLeads, ads, landing };
+}
+
+export type ChannelRow = { key: LeadChannel; label: string; spend: number | null; totals: Totals };
+
+/** Instant forms vs landing pages vs leads that didn't come from an ad, side by side. */
+export function channelBreakdown(settings: FunnelSettings, allLeads: Lead[], ads: AdRow[], landing: { ids: Set<string>; names: Set<string> }): ChannelRow[] {
+  const spendOf = (ch: string) => sum(ads.filter((a) => a.channel === ch).map((a) => Number(a.spend)));
+  const metaOf = (ch: string): MetaRow[] =>
+    ads
+      .filter((a) => a.channel === ch)
+      .map((a) => ({ date: a.date, spend: Number(a.spend), reach: a.reach, unique_outbound_clicks: a.unique_outbound_clicks, unique_link_clicks: a.unique_link_clicks, lpv: a.lpv, meta_leads: a.meta_leads }));
+  const of = (ch: LeadChannel) => allLeads.filter((l) => leadChannel(l, landing) === ch);
+  return [
+    { key: "form", label: "Instant forms", spend: spendOf("form"), totals: computeTotals(settings, metaOf("form"), of("form")) },
+    { key: "landing", label: "Landing pages", spend: spendOf("landing"), totals: computeTotals(settings, metaOf("landing"), of("landing")) },
+    { key: "unpaid", label: "Not from an ad (organic, direct, manual)", spend: null, totals: computeTotals(settings, [], of("unpaid")) },
+  ];
 }
 
 export function inStep(lead: Lead, step: FunnelSettings["steps"][number]): boolean {
@@ -93,30 +181,38 @@ export function computeTotals(settings: FunnelSettings, meta: MetaRow[], leads: 
   };
 }
 
-export type AdSummary = { ad: string; campaign: string | null; spend: number | null; leads: number; steps: number[]; sales: number; revenue: number };
+export type AdSummary = {
+  ad: string;
+  campaign: string | null;
+  channel: string | null;
+  spend: number | null;
+  leads: number;
+  steps: number[];
+  sales: number;
+  revenue: number;
+};
 
 const adKey = (s: string | null | undefined) => (s ?? "").trim().toLowerCase();
 
-/** Meta spend per ad, matched to GHL leads by ad name (the utm_content each lead arrived with). */
-export async function summarizeAds(settings: FunnelSettings, from: string, to: string, leads: Lead[]): Promise<AdSummary[]> {
-  const ads = await selectAll<{ ad_id: string; ad_name: string | null; campaign_name: string | null; spend: number }>((a, b) =>
-    db().from("pd_meta_ad_daily").select("ad_id,ad_name,campaign_name,spend").gte("date", from).lte("date", to).range(a, b),
-  );
-  const empty = (ad: string, campaign: string | null, spend: number | null): AdSummary => ({
-    ad, campaign, spend, leads: 0, steps: settings.steps.map(() => 0), sales: 0, revenue: 0,
+/** Meta spend per ad, matched to GHL leads by ad ID (instant forms) or ad name (utm_content on landing pages). */
+export function summarizeAds(settings: FunnelSettings, ads: AdRow[], leads: Lead[], view: View): AdSummary[] {
+  const empty = (ad: string, campaign: string | null, channel: string | null, spend: number | null): AdSummary => ({
+    ad, campaign, channel, spend, leads: 0, steps: settings.steps.map(() => 0), sales: 0, revenue: 0,
   });
   const map = new Map<string, AdSummary>();
-  for (const r of ads) {
+  const idToKey = new Map<string, string>();
+  for (const r of ads.filter((a) => view === "all" || a.channel === view)) {
     const k = adKey(r.ad_name) || r.ad_id;
-    const g = map.get(k) ?? empty(r.ad_name || r.ad_id, r.campaign_name, 0);
+    idToKey.set(r.ad_id, k);
+    const g = map.get(k) ?? empty(r.ad_name || r.ad_id, r.campaign_name, r.channel, 0);
     g.spend = (g.spend ?? 0) + Number(r.spend);
     map.set(k, g);
   }
   for (const l of leads) {
-    let k = adKey(l.utm_content);
+    let k = (l.ad_id && idToKey.get(l.ad_id)) || adKey(l.utm_content);
     if (!map.has(k)) {
       k = "__none__";
-      if (!map.has(k)) map.set(k, empty("No matching ad (missing or unknown utm_content)", null, null));
+      if (!map.has(k)) map.set(k, empty("No matching ad (organic, or ad outside this period)", null, null, null));
     }
     const g = map.get(k)!;
     g.leads++;

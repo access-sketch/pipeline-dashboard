@@ -12,9 +12,20 @@ export type GhlContact = {
   tags: string[];
   customFields: { id: string; value: unknown }[];
   opportunities?: { id?: string; pipelineId: string; pipelineStageId: string; monetaryValue?: number; status?: string }[];
-  attributionSource?: { utmContent?: string; campaign?: string; utmCampaign?: string };
-  lastAttributionSource?: { utmContent?: string; campaign?: string; utmCampaign?: string };
+  attributionSource?: Attribution;
+  lastAttributionSource?: Attribution;
   searchAfter?: unknown[];
+};
+
+export type Attribution = {
+  utmContent?: string;
+  campaign?: string;
+  utmCampaign?: string;
+  medium?: string;
+  url?: string;
+  adId?: string;
+  adSource?: string;
+  fbclid?: string;
 };
 
 type Filter = { field: string; operator: string; value: unknown };

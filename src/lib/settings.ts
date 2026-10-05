@@ -70,3 +70,7 @@ export async function loadFunnelSettings(): Promise<{ settings: FunnelSettings; 
 export async function loadAccount(): Promise<Account | null> {
   return getValue<Account>("account");
 }
+
+export async function loadAdsetDestinations(): Promise<Record<string, string>> {
+  return (await getValue<Record<string, string>>("adsets")) ?? {};
+}
