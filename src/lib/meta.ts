@@ -198,16 +198,24 @@ export async function getAdsetDestinations(accountId: string): Promise<Record<st
 
 /**
  * Instant form, landing page, or other (Messenger, Instagram DM, ...).
- * The ad set's destination decides when it is clear; otherwise what the ad produced does.
+ * What the ad actually produced decides first (instant-form leads vs. website leads and page views);
+ * the ad set's destination is only used when there are no results yet.
+ * "WEBSITE_AND_LEAD_FORM" ad sets show an instant form, so they count as forms unless they bring website leads.
  */
 export function channelOf(destination: string | undefined, r: { lpv: number; form_leads: number; meta_leads: number; unique_outbound_clicks: number }): Channel {
   const d = (destination ?? "UNDEFINED").toUpperCase();
   if (d === "ON_AD") return "form";
-  if (d.includes("WEBSITE")) return "landing";
-  if (r.form_leads > 0 && r.lpv === 0) return "form";
-  if (r.lpv > 0 || r.unique_outbound_clicks > 0 || r.meta_leads > r.form_leads) return "landing";
-  if (d === "UNDEFINED") return "landing";
+  const websiteLeads = Math.max(0, r.meta_leads - r.form_leads);
+  if (r.form_leads > 0 && r.form_leads >= websiteLeads) return "form";
+  if (websiteLeads > 0 || r.lpv > 0) return "landing";
+  if (d.includes("LEAD_FORM")) return "form";
+  if (d.includes("WEBSITE") || r.unique_outbound_clicks > 0 || d === "UNDEFINED") return "landing";
   return "other";
+}
+
+/** True when an ad has produced anything that tells us its channel. */
+export function hasChannelEvidence(r: { lpv: number; form_leads: number; meta_leads: number }): boolean {
+  return r.form_leads > 0 || r.meta_leads > 0 || r.lpv > 0;
 }
 
 export type ChannelUniques = Record<Channel, { reach: number; uniqueOutboundClicks: number; uniqueLinkClicks: number }>;

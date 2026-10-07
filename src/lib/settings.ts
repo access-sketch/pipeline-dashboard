@@ -1,4 +1,6 @@
+import { createHash } from "crypto";
 import { config } from "@/config";
+import { PRESETS, StageRef } from "@/presets";
 import { getPipelines, Pipeline } from "./ghl";
 import { db } from "./supabase";
 
@@ -21,12 +23,26 @@ const lower = (s: string) => s.toLowerCase();
  * Best guess from stage names, used until someone saves the Settings page.
  * Works for the usual setups: "... Booked", "Follow Up ...", "... Close ...", "No Show".
  */
-export function defaultSettings(pipelines: Pipeline[]): FunnelSettings {
+export function defaultSettings(pipelines: Pipeline[], locationId?: string): FunnelSettings {
+  const preset = locationId ? PRESETS[createHash("sha256").update(locationId).digest("hex").slice(0, 16)] : undefined;
+  if (preset) {
+    const key = (s: string) => s.replace(/[™®©]/g, "").normalize("NFKC").replace(/[\u2018\u2019]/g, "'").replace(/[^\p{L}\p{N}\s'-]/gu, "").replace(/\s+/g, " ").trim().toLowerCase();
+    const ids = (refs: StageRef[]) =>
+      refs.flatMap((r) =>
+        pipelines
+          .filter((p) => key(p.name) === key(r.pipeline))
+          .flatMap((p) => p.stages.filter((s) => key(s.name) === key(r.stage)).map((s) => s.id)),
+      );
+    return {
+      steps: preset.steps.map((st, i) => ({ id: `step${i}`, label: st.label, stageIds: ids(st.stages), includeWon: st.includeWon })),
+      noShowStageIds: ids(preset.noShow),
+    };
+  }
   const stages = pipelines.flatMap((p) => p.stages);
   const pick = (yes: RegExp, no?: RegExp) => stages.filter((s) => yes.test(lower(s.name)) && !(no && no.test(lower(s.name))));
   const notLead = /cancel|unrespon|not sched|new lead|lost|unqualif|disqualif|dead|nurture/;
   const booked = pick(/book|resched|no.?show|follow|close|closing|call|demo|meeting|consult|showed|discovery/, notLead);
-  const follow = pick(/follow/, /cancel/);
+  const follow = pick(/follow/, /cancel|nurture/);
   const close = pick(/close|closing/, /lost|cancel/);
   const noShow = pick(/no.?show/);
   const firstBooked = booked.find((s) => /book/.test(lower(s.name)));
@@ -64,7 +80,7 @@ export async function loadPipelines(): Promise<Pipeline[]> {
 export async function loadFunnelSettings(): Promise<{ settings: FunnelSettings; isDefault: boolean }> {
   const saved = await getValue<FunnelSettings>("funnel");
   if (saved) return { settings: saved, isDefault: false };
-  return { settings: defaultSettings(await loadPipelines()), isDefault: true };
+  return { settings: defaultSettings(await loadPipelines(), process.env.GHL_LOCATION_ID?.trim()), isDefault: true };
 }
 
 export async function loadAccount(): Promise<Account | null> {
@@ -73,4 +89,8 @@ export async function loadAccount(): Promise<Account | null> {
 
 export async function loadAdsetDestinations(): Promise<Record<string, string>> {
   return (await getValue<Record<string, string>>("adsets")) ?? {};
+}
+
+export async function loadAdChannels(): Promise<Record<string, "form" | "landing" | "other">> {
+  return (await getValue<Record<string, "form" | "landing" | "other">>("ad_channels")) ?? {};
 }

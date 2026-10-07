@@ -1,4 +1,5 @@
 import { config } from "@/config";
+import { singular } from "@/lib/words";
 import { daysBetween } from "@/lib/dates";
 import { dateTime, int, money, shortDate } from "@/lib/format";
 import { getRangeUniques, getRangeUniquesByChannel } from "@/lib/meta";
@@ -150,7 +151,7 @@ export default async function Dashboard({ searchParams }: Props) {
                     <th key={s.id}>{s.label}</th>
                   ))}
                   {settings.steps.map((s) => (
-                    <th key={`c${s.id}`}>Cost per {s.label.toLowerCase().replace(/\bcalls\b/, "call").replace(/ups\b/, "up")}</th>
+                    <th key={`c${s.id}`}>Cost per {singular(s.label)}</th>
                   ))}
                 </tr>
               </thead>
@@ -243,7 +244,7 @@ export default async function Dashboard({ searchParams }: Props) {
                   {settings.steps.map((s) => (
                     <th key={s.id}>{s.label}</th>
                   ))}
-                  <th>Cost per {settings.steps[0]?.label.toLowerCase().replace(/calls/, "call") ?? "step"}</th>
+                  <th>Cost per {settings.steps[0] ? singular(settings.steps[0].label) : "step"}</th>
                   <th>Won</th>
                 </tr>
               </thead>

@@ -2,9 +2,9 @@ import { config, excluded, TEST_NAME_PATTERN } from "@/config";
 import { addDays, localDate, todayIn } from "./dates";
 import { getAllOpportunities, getPipelines, getUtmContentFieldIds, GhlContact, searchContacts } from "./ghl";
 import { mapLimit } from "./http";
-import { channelOf, getAccountInfo, getAdsetDestinations, getDailyAdInsights, getDailyInsights } from "./meta";
+import { Channel, channelOf, getAccountInfo, getAdsetDestinations, getDailyAdInsights, getDailyInsights, hasChannelEvidence } from "./meta";
 import { ensureSchema } from "./migrate";
-import { setValue } from "./settings";
+import { loadAdChannels, setValue } from "./settings";
 import { db, upsertChunks } from "./supabase";
 
 export type StepResult = { step: string; ok: boolean; count?: number; error?: string };
@@ -44,6 +44,25 @@ export async function syncAll(opts: { days: number; trigger: string }): Promise<
       getAdsetDestinations(id).catch(() => ({}) as Record<string, string>),
     ]);
     await setValue("adsets", destinations);
+
+    // Decide each ad's channel from everything it produced in the period, not day by day,
+    // and remember it so quiet days later on keep the same channel.
+    const known = await loadAdChannels();
+    const perAd = new Map<string, { adset: string | null; lpv: number; form_leads: number; meta_leads: number; unique_outbound_clicks: number }>();
+    for (const r of ads) {
+      const a = perAd.get(r.ad_id) ?? { adset: r.adset_id, lpv: 0, form_leads: 0, meta_leads: 0, unique_outbound_clicks: 0 };
+      a.lpv += r.lpv;
+      a.form_leads += r.form_leads;
+      a.meta_leads += r.meta_leads;
+      a.unique_outbound_clicks += r.unique_outbound_clicks;
+      perAd.set(r.ad_id, a);
+    }
+    const adChannel: Record<string, Channel> = { ...known };
+    for (const [adId, a] of perAd) {
+      const dest = a.adset ? destinations[a.adset] : undefined;
+      if (hasChannelEvidence(a) || !known[adId]) adChannel[adId] = channelOf(dest, a);
+    }
+    await setValue("ad_channels", adChannel);
     const now = new Date().toISOString();
     await upsertChunks(
       "pd_meta_daily",
@@ -58,7 +77,7 @@ export async function syncAll(opts: { days: number; trigger: string }): Promise<
       "pd_meta_ad_daily",
       ads.map((r) => ({
         date: r.date, ad_id: r.ad_id, ad_name: r.ad_name, adset_id: r.adset_id, campaign_name: r.campaign_name,
-        channel: channelOf(r.adset_id ? destinations[r.adset_id] : undefined, r),
+        channel: adChannel[r.ad_id] ?? channelOf(r.adset_id ? destinations[r.adset_id] : undefined, r),
         spend: r.spend, impressions: r.impressions, reach: r.reach, clicks: r.clicks,
         unique_outbound_clicks: r.unique_outbound_clicks, unique_link_clicks: r.unique_link_clicks,
         lpv: r.lpv, meta_leads: r.meta_leads, form_leads: r.form_leads, updated_at: now,

@@ -1,4 +1,5 @@
 import { int, money } from "@/lib/format";
+import { singular } from "@/lib/words";
 import { Delta } from "./ui";
 
 export type FunnelData = {
@@ -193,13 +194,4 @@ export function AdFunnel({
       </ol>
     </section>
   );
-}
-
-function singular(label: string) {
-  // "Discovery calls booked" → "discovery call booked", "Follow-ups" → "follow-up"
-  return label
-    .toLowerCase()
-    .replace(/\bcalls\b/, "call")
-    .replace(/ups\b/, "up")
-    .replace(/deals\b/, "deal");
 }
